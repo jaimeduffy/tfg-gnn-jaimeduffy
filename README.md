@@ -1,13 +1,13 @@
 
 # TFG-GTAN-JAIMEDUFFY
 
-Este repositorio contiene la implementación reproducible del modelo **GTAN (Graph Temporal Attention Network)** aplicado al conjunto de datos **S-FFSD**, como parte del Trabajo de Fin de Grado en Ingeniería Informática.
+Este repositorio contiene la implementación del modelo **GTAN (Graph Temporal Attention Network)** aplicado al conjunto de datos **S-FFSD**, como parte de mi trabajo de fin de grado sobre Graph Neural Networks (GNNs).
 
 ---
 
-## 🧠 ¿Qué es GTAN?
+## ¿Qué es GTAN?
 
-**GTAN** es un modelo de redes neuronales sobre grafos que incorpora atención temporal para detectar eventos fraudulentos en escenarios de series temporales multirrelacionales. El modelo se basa en el paper:
+**GTAN** es un modelo graph neural networks que incorpora mecanismos de atención temporal para detectar comportamientos fraudulentos en escenarios con datos multirrelacionales y dependencias temporales. El modelo se basa en el paper:
 
 > **GTAN: A Graph Temporal Attentive Network for Fraud Detection**  
 > https://arxiv.org/abs/2412.18287  
@@ -41,8 +41,8 @@ TFG-GTAN-JAIMEDUFFY/
 ### 1. Clona el repositorio
 
 ```bash
-git clone https://github.com/jaimeduffy/TFG-GTAN-JAIMEDUFFY.git
-cd TFG-GTAN-JAIMEDUFFY
+git clone https://github.com/jaimeduffy/tfg-gtan-jaimeduffy.git
+cd tfg-gtan-jaimeduffy
 ```
 
 ### 2. Crea y activa un entorno virtual (recomendado con conda)
@@ -73,7 +73,7 @@ python main.py
 
 ---
 
-## 📝 Resultados esperados
+## Resultados esperados
 
 El modelo imprimirá durante el entrenamiento los valores de pérdida, AUC, F1 y AP en validación y test. También puedes activar el guardado del modelo entrenado en `config/gtan_cfg.yaml` con:
 
@@ -84,14 +84,9 @@ model_path: gtan_trained.pth
 
 ---
 
-## 📚 Créditos
+## Créditos
 
 Este trabajo se ha basado en el código original publicado por [AI4Risk](https://github.com/AI4Risk/antifraud), adaptado, depurado y documentado para su uso académico.
 
 El desarrollo forma parte del **Trabajo de Fin de Grado** de Jaime Duffy (Universidad de Sevilla, 2025).
 
----
-
-## 📄 Licencia
-
-Este proyecto se publica bajo licencia MIT con fines educativos y de investigación.
