@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.ipynb_checkpoints/
+
+# Entornos
+.env
+.venv
+*.env
+*.venv
+
+# Archivos grandes/resultados
+*.pth
+*.pt
+*.ckpt
+*.log
+*.csv
+*.bin
+*.npz
+
+# Datos procesados
+data/graph-*.bin
+data/*_neigh_feat.csv
+data/*feat_data.csv
+data/*label_data.csv
+
+# VSCode y sistema
+.vscode/
+.DS_Store
+
+# Datos sin comprimir
+data/S-FFSD/

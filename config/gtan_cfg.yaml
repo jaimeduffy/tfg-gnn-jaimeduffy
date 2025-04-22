@@ -1,0 +1,31 @@
+# Configuración del modelo GTAN sobre el dataset S-FFSD
+
+#Datos
+dataset: S-FFSD
+test_size: 0.4  # proporción del conjunto de datos para test
+
+# Entrenamiento
+batch_size: 128
+max_epochs: 15
+early_stopping: 10
+seed: 2023
+n_fold: 5 
+
+# Modelo
+hid_dim: 256
+n_layers: 2
+dropout: [0.2, 0.1]
+gated: true  # activa el mecanismo de compuerta (GTAN)
+
+# Optimización
+lr: 0.003
+wd: 1e-4
+
+# Dispositivo
+device: "cpu"
+
+# Guardado del modelo
+save_model: true
+model_path: "gtan_trained.pth"
+
+
