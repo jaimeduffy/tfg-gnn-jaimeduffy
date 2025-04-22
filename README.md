@@ -15,7 +15,7 @@ Este repositorio contiene la implementación del modelo **GTAN (Graph Temporal A
 
 ---
 
-## 📁 Estructura del repositorio
+## Estructura del repositorio
 
 ```
 TFG-GTAN-JAIMEDUFFY/
@@ -36,7 +36,7 @@ TFG-GTAN-JAIMEDUFFY/
 
 ---
 
-## 🚀 ¿Cómo ejecutar el proyecto?
+## ¿Cómo ejecutar el proyecto?
 
 ### 1. Clona el repositorio
 
