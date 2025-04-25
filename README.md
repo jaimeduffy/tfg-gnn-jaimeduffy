@@ -1,8 +1,8 @@
 
 # Graph Neural Networks: Deep learning para entornos no estructurados.
----
+
 Proyecto de TFG de Jaime Duffy Panés | jaidufpan@alum.us.es
----
+
 
 Este repositorio contiene la implementación de los experimentos realizados como parte de mi trabajo de fin de grado sobre Graph Neural Networks (GNNs).
 
