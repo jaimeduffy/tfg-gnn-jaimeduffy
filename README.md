@@ -1,5 +1,5 @@
 
-# TFG-GTAN-JAIMEDUFFY
+# TFG-GNN-JAIMEDUFFY
 
 Este repositorio contiene la implementación del modelo **GTAN (Graph Temporal Attention Network)** aplicado al conjunto de datos **S-FFSD**, como parte de mi trabajo de fin de grado sobre Graph Neural Networks (GNNs).
 
