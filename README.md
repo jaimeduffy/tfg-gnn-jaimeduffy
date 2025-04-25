@@ -5,16 +5,6 @@ Este repositorio contiene la implementación de los experimentos realizados como
 
 ---
 
-## ¿Qué es GTAN?
-
-**GTAN** es un modelo graph neural networks que incorpora mecanismos de atención temporal para detectar comportamientos fraudulentos en escenarios con datos multirrelacionales y dependencias temporales. El modelo se basa en el paper:
-
-> **GTAN: A Graph Temporal Attentive Network for Fraud Detection**  
-> https://arxiv.org/abs/2412.18287  
-> [Código original del paper](https://github.com/AI4Risk/antifraud)
-
----
-
 ## Estructura del repositorio
 
 ```
@@ -29,8 +19,10 @@ TFG-GTAN-JAIMEDUFFY/
 │   ├── __init__.py
 │   ├── gtan_model.py          # Definición de la arquitectura GTAN
 │   └── gtan_main.py           # Entrenamiento, validación y test
+├── notebooks/
+│   └── gnn-examples.ipynb     # Implementaciones con GCN, GAT y predicción de enlaces
 ├── main.py                    # Punto de entrada para lanzar el experimento
-├── requirements.txt           # Dependencias necesarias
+├── environment.txt           # Dependencias necesarias
 └── README.md
 ```
 
