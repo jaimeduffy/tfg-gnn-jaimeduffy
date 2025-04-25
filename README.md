@@ -1,7 +1,7 @@
 
 # TFG-GNN-JAIMEDUFFY
 
-Este repositorio contiene la implementación del modelo **GTAN (Graph Temporal Attention Network)** aplicado al conjunto de datos **S-FFSD**, como parte de mi trabajo de fin de grado sobre Graph Neural Networks (GNNs).
+Este repositorio contiene la implementación de los experimentos realizados como parte de mi trabajo de fin de grado sobre Graph Neural Networks (GNNs).
 
 ---
 
@@ -41,8 +41,8 @@ TFG-GTAN-JAIMEDUFFY/
 ### 1. Clona el repositorio
 
 ```bash
-git clone https://github.com/jaimeduffy/tfg-gtan-jaimeduffy.git
-cd tfg-gtan-jaimeduffy
+git clone https://github.com/jaimeduffy/tfg-gnn-jaimeduffy.git
+cd tfg-gnn-jaimeduffy
 ```
 
 ### 2. Crea y activa un entorno virtual (recomendado con conda)
@@ -50,7 +50,7 @@ cd tfg-gtan-jaimeduffy
 ```bash
 conda create -n antifraud-env python=3.7
 conda activate antifraud-env
-pip install -r requirements.txt
+pip install -r environment.txt
 ```
 
 ### 3. Descomprime el dataset
