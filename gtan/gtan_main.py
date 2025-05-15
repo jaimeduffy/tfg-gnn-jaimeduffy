@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn as nn
 import json
 import numpy as np
 import pandas as pd
@@ -67,7 +68,20 @@ def train_and_evaluate(config_path="config/gtan_cfg.yaml"):
         train_idx = torch.tensor(train_idx)
         test_idx = torch.tensor(test_idx)
 
-        model = GraphAttnModel(args).to(device)
+        model = GraphAttnModel(
+            in_feats=feat_data.shape[1],
+            hidden_dim=args['hidden_dim'],
+            n_classes=args['n_classes'],
+            heads=args['heads'],
+            n_layers=args['n_layers'],
+            activation=nn.ReLU(),
+            drop=args['dropout'],
+            device=device,
+            gated=args['gated'],
+            ref_df=feat_data,
+            cat_features=cat_data
+        ).to(device)
+
         optimizer = torch.optim.Adam(model.parameters(), lr=args["lr"], weight_decay=args["wd"])
         stopper = early_stopper(patience=args["early_stopping"])
 
