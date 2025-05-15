@@ -55,7 +55,7 @@ pip install -r environment.txt
 ### 3. Descomprime el dataset
 
 ```bash
-unzip data/S-FFSD.zip -d data/
+unzip /data/S-FFSD.zip
 ```
 
 ### 4. Ejecuta el preprocesamiento
