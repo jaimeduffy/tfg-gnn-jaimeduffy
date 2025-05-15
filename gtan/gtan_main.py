@@ -1,5 +1,6 @@
 import os
 import torch
+import json
 import numpy as np
 import pandas as pd
 import dgl
@@ -49,7 +50,11 @@ def train_and_evaluate(config_path="config/gtan_cfg.yaml"):
     args = load_config(config_path)
     set_seed(args["seed"])
 
-    device = torch.device(args["device"])
+    if args["device"] == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args["device"])
+    print(f"Usando dispositivo: {device}")
 
     g, feat_data, cat_data, labels = load_gtan_data(args)
     skf = StratifiedKFold(n_splits=args["n_fold"], shuffle=True, random_state=args["seed"])
@@ -66,17 +71,25 @@ def train_and_evaluate(config_path="config/gtan_cfg.yaml"):
         optimizer = torch.optim.Adam(model.parameters(), lr=args["lr"], weight_decay=args["wd"])
         stopper = early_stopper(patience=args["early_stopping"])
 
+        epoch_metrics = []
         for epoch in range(args["max_epochs"]):
             model.train()
             optimizer.zero_grad()
+            
+            # Entrenamiento
             g_batch, feat_batch, cat_batch, label_batch = load_subtensor(
                 g, feat_data, cat_data, labels, train_idx, device
             )
             logits = model(g_batch, feat_batch, cat_batch)
-            loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, label_batch.float())
-            loss.backward()
+            train_loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, label_batch.float())
+            train_loss.backward()
             optimizer.step()
-
+            
+            # Cálculo del AUC en entrenamiento
+            train_probs = torch.sigmoid(logits)
+            train_auc = roc_auc_score(label_batch.cpu(), train_probs.cpu())
+            
+            # Validación
             model.eval()
             with torch.no_grad():
                 _, val_feat, val_cat, val_label = load_subtensor(
@@ -84,9 +97,19 @@ def train_and_evaluate(config_path="config/gtan_cfg.yaml"):
                 )
                 val_logits = model(g, val_feat, val_cat)
                 val_probs = torch.sigmoid(val_logits)
+                val_loss = torch.nn.functional.binary_cross_entropy_with_logits(val_logits, val_label.float()).item()
                 val_auc = roc_auc_score(val_label.cpu(), val_probs.cpu())
 
-            print(f"Epoch {epoch+1}, Loss: {loss.item():.4f}, Val AUC: {val_auc:.4f}")
+            print(f"Epoch {epoch+1} | Train Loss: {train_loss.item():.4f} | Train AUC: {train_auc:.4f} | Val Loss: {val_loss:.4f} | Val AUC: {val_auc:.4f}")
+
+            epoch_metrics.append({
+                "epoch": epoch + 1,
+                "train_loss": train_loss.item(),
+                "train_auc": train_auc,
+                "val_loss": val_loss,
+                "val_auc": val_auc
+            })
+
             stopper(val_auc, model)
             if stopper.early_stop:
                 print("Early stopping.")
@@ -111,6 +134,9 @@ def train_and_evaluate(config_path="config/gtan_cfg.yaml"):
         auc_list.append(auc)
         f1_list.append(f1)
         ap_list.append(ap)
+
+        with open(f"fold_{fold+1}_metrics.json", "w") as f:
+            json.dump(epoch_metrics, f, indent=4)
 
     # Resultados finales
     print("\n===== Resultados Promedio =====")

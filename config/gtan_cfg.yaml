@@ -22,7 +22,7 @@ lr: 0.003
 wd: 1e-4
 
 # Dispositivo
-device: "cpu"
+device: "auto"
 
 # Guardado del modelo
 save_model: true
