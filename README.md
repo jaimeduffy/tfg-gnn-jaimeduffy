@@ -72,17 +72,6 @@ python main.py
 
 ---
 
-## Resultados esperados
-
-El modelo imprimirá durante el entrenamiento los valores de pérdida, AUC, F1 y AP en validación y test. También puedes activar el guardado del modelo entrenado en `config/gtan_cfg.yaml` con:
-
-```yaml
-save_model: true
-model_path: gtan_trained.pth
-```
-
----
-
 ## Créditos
 
 Este trabajo se ha basado en el código original publicado por [AI4Risk](https://github.com/AI4Risk/antifraud), adaptado, depurado y documentado para su uso académico.
