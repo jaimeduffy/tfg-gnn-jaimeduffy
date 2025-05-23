@@ -27,7 +27,7 @@ venv/
 
 #  Datos crudos y resultados
 data/
-results/
+results/*
 !results/*.png
 
 # IDEs y sistema
