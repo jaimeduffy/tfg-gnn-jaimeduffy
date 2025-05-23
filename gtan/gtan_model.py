@@ -247,7 +247,6 @@ def load_gtan_data(dataset: str, test_size: float):
         indices, test_size=test_size, stratify=labels, random_state=2
     )
 
-    # Guarda el grafo por si quieres recargarlo
     graph_path = prefix + f"graph-{dataset}.bin"
     dgl.data.utils.save_graphs(graph_path, [graph])
 
