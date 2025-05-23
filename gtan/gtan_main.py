@@ -144,13 +144,15 @@ def gtan_main(feat_df, graph, train_idx, test_idx, labels, args, cat_features):
                     val_acc_sum += (torch.argmax(vl, 1) == tgt).sum().item()
                     val_count += tgt.shape[0]
 
-            mean_val_loss = val_loss / val_count
-            stopper.earlystop(mean_val_loss, model)
-            print(f"-- Validation loss: {mean_val_loss:.4f}")
-            epoch_logs.append({"epoch": epoch,"train_loss": float(np.mean(train_losses)),"val_loss":   float(mean_val_loss)})
-            if stopper.is_earlystop:
-                print(">>> Early stopping")
-                break
+            if val_count > 0:
+                mean_val_loss = val_loss / val_count
+                stopper.earlystop(mean_val_loss, model)
+                print(f"-- Validation loss: {mean_val_loss:.4f}")
+                if stopper.is_earlystop:
+                    print(">>> Early stopping")
+                    break
+            else:
+                print("-- Validation loss: n/a (sin etiquetas 0/1 en este fold)")
 
         df_loss = pd.DataFrame(epoch_logs)
         df_loss.to_csv(results_dir / f"fold{fold+1}_losses.csv", index=False)
