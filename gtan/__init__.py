@@ -1,4 +1,5 @@
 from .gtan_model import GraphAttnModel
+from .gtan_lpa import load_lpa_subtensor
 import copy
 
 

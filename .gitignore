@@ -1,34 +1,35 @@
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
 *.ipynb_checkpoints/
 
-# Entornos
+# Entornos virtuales
 .env
 .venv
-*.env
-*.venv
+ENV/
+env/
+venv/
 
-# Archivos grandes/resultados
+# Logs
+*.log
+
+# Modelos entrenados / checkpoints
 *.pth
 *.pt
 *.ckpt
-*.log
+
+# Datos intermedios / resultados grandes
+*.npz
 *.csv
 *.bin
-*.npz
 
-# Datos procesados
-data/graph-*.bin
-data/*_neigh_feat.csv
-data/*feat_data.csv
-data/*label_data.csv
+#  Datos crudos y resultados
+data/
+results/
+!results/*.png
 
-# VSCode y sistema
+# IDEs y sistema
 .vscode/
 .DS_Store
-
-# Datos sin comprimir
-data/S-FFSD/

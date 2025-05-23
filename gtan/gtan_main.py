@@ -1,185 +1,254 @@
 import os
-import json
 import numpy as np
 import pandas as pd
 import dgl
 import torch
 import torch.nn as nn
-import yaml
+import torch.optim as optim
+from pathlib import Path
 
-from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import roc_auc_score, f1_score, average_precision_score
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
+from sklearn.model_selection import StratifiedKFold, train_test_split
 
-from gtan import early_stopper
-from gtan.gtan_model import GraphAttnModel
+from dgl.dataloading import MultiLayerFullNeighborSampler, NodeDataLoader
+from torch.optim.lr_scheduler import MultiStepLR
 
-
-def set_seed(seed):
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-
-
-def load_config(path):
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+from .gtan_model import GraphAttnModel
+from .gtan_lpa import load_lpa_subtensor
+from . import early_stopper
 
 
-def load_gtan_data(config):
-    assert config["dataset"] == "S-FFSD", "Solo S-FFSD soportado."
-    root = os.path.join(os.path.dirname(__file__), "..", "data")
-    g_path = os.path.join(root, "graph-S-FFSD.bin")
-    feat_path = os.path.join(root, "S-FFSD_neigh_feat.csv")
+def gtan_main(feat_df, graph, train_idx, test_idx, labels, args, cat_features):
+    device = args['device']
+    graph = graph.to(device)
 
-    g, _ = dgl.load_graphs(g_path)
-    g = g[0]
-    feat_data = torch.tensor(pd.read_csv(feat_path).values).float()
-    labels = g.ndata['label']
-    cat_data = torch.zeros_like(feat_data)
+    results_dir = Path("results")
+    results_dir.mkdir(exist_ok=True)
 
-    return g, feat_data, cat_data, labels
+    oof_predictions  = torch.zeros(len(feat_df), 2, device=device)
+    test_predictions = torch.zeros(len(feat_df), 2, device=device)
 
-
-def load_subtensor(g, feat_data, cat_data, labels, idx, device):
-    return (
-        g,
-        feat_data[idx].to(device),
-        cat_data[idx].to(device),
-        labels[idx].to(device)
+    kfold = StratifiedKFold(
+        n_splits=args['n_fold'], shuffle=True, random_state=args['seed']
     )
+    y_target = labels.iloc[train_idx].values
 
+    # Prepara tensores de features
+    num_feat = torch.from_numpy(feat_df.values).float().to(device)
+    cat_feat = {
+        col: torch.from_numpy(feat_df[col].values).long().to(device)
+        for col in cat_features
+    }
+    labels = torch.from_numpy(labels.values).long().to(device)
+    loss_fn = nn.CrossEntropyLoss().to(device)
 
-def train_and_evaluate(config_path="config/gtan_cfg.yaml"):
-    args = load_config(config_path)
-    set_seed(args["seed"])
+    
+    # Cross-validation
+    for fold, (trn_idx, val_idx) in enumerate(
+        kfold.split(feat_df.iloc[train_idx], y_target)
+    ):
+        print(f'=== Training fold {fold+1}/{args["n_fold"]} ===')
+        epoch_logs = []
+        trn_idx = torch.tensor(np.array(train_idx)[trn_idx], dtype=torch.long, device=device)
+        val_idx = torch.tensor(np.array(train_idx)[val_idx], dtype=torch.long, device=device)
 
-    if args["device"] == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(args["device"])
-    print(f"Usando dispositivo: {device}")
+        train_sampler = MultiLayerFullNeighborSampler(args['n_layers'])
+        train_dl = NodeDataLoader(
+            graph, trn_idx, train_sampler,
+            batch_size=args['batch_size'], shuffle=True, device=device
+        )
+        val_dl = NodeDataLoader(
+            graph, val_idx, train_sampler,
+            batch_size=args['batch_size'], shuffle=False, device=device
+        )
 
-    g, feat_data, cat_data, labels = load_gtan_data(args)
-    skf = StratifiedKFold(n_splits=args["n_fold"],
-                          shuffle=True,
-                          random_state=args["seed"])
+        drop_cfg = args['dropout']
+        if isinstance(drop_cfg, (list, tuple)):
+            drop_tuple = tuple(drop_cfg)
+        else:
+            drop_tuple = (drop_cfg, drop_cfg)
 
-    auc_list, f1_list, ap_list = [], [], []
-
-    for fold, (train_idx, test_idx) in enumerate(skf.split(feat_data, labels)):
-        print(f"\n===== Fold {fold + 1}/{args['n_fold']} =====")
-        train_idx = torch.tensor(train_idx)
-        test_idx  = torch.tensor(test_idx)
-
+        # Modelo y optimizador
         model = GraphAttnModel(
-            in_feats   = feat_data.shape[1],
-            hidden_dim = args['hid_dim'],
-            n_layers   = args['n_layers'],
-            n_classes  = 2,
-            heads      = [4] * args['n_layers'],
-            activation = nn.ReLU(),
-            gated      = args['gated'],
-            n2v_feat   = False,            
-            drop       = args['dropout'],
-            device     = device
+            in_feats=feat_df.shape[1],
+            hidden_dim=args['hid_dim'] // 4,
+            n_layers=args['n_layers'],
+            n_classes=2,
+            heads=[4] * args['n_layers'],
+            activation=nn.PReLU(),
+            drop=drop_tuple,
+            gated=args['gated'],
+            ref_df=feat_df,
+            cat_features=cat_feat,
+            device=device
         ).to(device)
 
-        
-        optimizer = torch.optim.Adam(
-            model.parameters(),
-            lr=float(args["lr"]),
-            weight_decay=float(args["wd"])
-        )
-        stopper = early_stopper(patience=args["early_stopping"])
+        lr = args['lr'] * np.sqrt(args['batch_size'] / 1024)
+        optimizer = optim.Adam(model.parameters(),lr=float(lr),weight_decay=float(args['wd']))
+        scheduler = MultiStepLR(optimizer, milestones=[4000, 12000], gamma=0.3)
 
-        epoch_metrics = []
-        
-        for epoch in range(args["max_epochs"]):
+        stopper = early_stopper(patience=args['early_stopping'], verbose=True)
+
+        # Bucles de entrenamiento
+        for epoch in range(args['max_epochs']):
             model.train()
-            optimizer.zero_grad()
-
-            # carga batch completo (grafo, features, labels)
-            g_batch, feat_batch, cat_batch, label_batch = load_subtensor(
-                g, feat_data, cat_data, labels, train_idx, device
-            )
-            logits = model(g_batch, feat_batch, label_batch)
-            train_loss = torch.nn.functional.binary_cross_entropy_with_logits(
-                logits, label_batch.float()
-            )
-            train_loss.backward()
-            optimizer.step()
-
-            # AUC entrenamiento
-            train_auc = roc_auc_score(
-                label_batch.cpu(), torch.sigmoid(logits).cpu()
-            )
-
-            # validación
-            model.eval()
-            with torch.no_grad():
-                _, val_feat, val_cat, val_label = load_subtensor(
-                    g, feat_data, cat_data, labels, test_idx, device
+            train_losses = []
+            for step, (input_nodes, seeds, blocks) in enumerate(train_dl):
+                batch_in, batch_work, batch_lbls, lpa_lbls = load_lpa_subtensor(
+                    num_feat, cat_feat, labels, seeds, input_nodes, device
                 )
-                val_logits = model(g, val_feat, val_label)
-                val_probs  = torch.sigmoid(val_logits)
-                val_loss   = torch.nn.functional.binary_cross_entropy_with_logits(
-                    val_logits, val_label.float()
-                ).item()
-                val_auc    = roc_auc_score(val_label.cpu(), val_probs.cpu())
+                blocks = [b.to(device) for b in blocks]
 
-            print(f"Epoch {epoch+1} | "
-                  f"Train Loss: {train_loss.item():.4f} | Train AUC: {train_auc:.4f} | "
-                  f"Val Loss: {val_loss:.4f} | Val AUC: {val_auc:.4f}")
+                logits = model(blocks, batch_in, lpa_lbls, batch_work)
+                mask = batch_lbls == 2
+                logits = logits[~mask]
+                targets = batch_lbls[~mask]
 
-            epoch_metrics.append({
-                "epoch": epoch + 1,
-                "train_loss": train_loss.item(),
-                "train_auc": train_auc,
-                "val_loss": val_loss,
-                "val_auc": val_auc
-            })
+                loss = loss_fn(logits, targets)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
 
-            # early stopping
-            stopper(val_auc, model)
+                train_losses.append(loss.item())
+                if step % 10 == 0:
+                    preds = torch.argmax(logits, dim=1)
+                    acc = (preds == targets).float().mean()
+                    scores = torch.softmax(logits, dim=1)[:, 1].detach().cpu().numpy()
+                    try:
+                        ap  = average_precision_score(targets.cpu().numpy(), scores)
+                        auc = roc_auc_score(targets.cpu().numpy(), scores)
+                        print(f"[Epoch {epoch:03d} Batch {step:04d}] "
+                              f"loss={np.mean(train_losses):.4f} ap={ap:.4f} "
+                              f"acc={acc:.4f} auc={auc:.4f}")
+                    except:
+                        pass
+
+            # Validación
+            model.eval()
+            val_loss, val_acc_sum, val_count = 0.0, 0.0, 0
+            with torch.no_grad():
+                for _, (inp, seeds, blks) in enumerate(val_dl):
+                    bi, bw, bl, ll = load_lpa_subtensor(
+                        num_feat, cat_feat, labels, seeds, inp, device
+                    )
+                    blks = [b.to(device) for b in blks]
+                    vl = model(blks, bi, ll, bw)
+                    oof_predictions[seeds] = vl
+
+                    mask = bl == 2
+                    vl = vl[~mask]
+                    tgt = bl[~mask]
+                    val_loss += loss_fn(vl, tgt).item() * tgt.shape[0]
+                    val_acc_sum += (torch.argmax(vl, 1) == tgt).sum().item()
+                    val_count += tgt.shape[0]
+
+            mean_val_loss = val_loss / val_count
+            stopper.earlystop(mean_val_loss, model)
+            print(f"-- Validation loss: {mean_val_loss:.4f}")
+            epoch_logs.append({"epoch": epoch,"train_loss": float(np.mean(train_losses)),"val_loss":   float(mean_val_loss)})
             if stopper.is_earlystop:
-                print("Early stopping.")
+                print(">>> Early stopping")
                 break
 
-        # evaluar mejor modelo guardado
-        best_model = stopper.best_model.to(device)
-        best_model.eval()
+        df_loss = pd.DataFrame(epoch_logs)
+        df_loss.to_csv(results_dir / f"fold{fold+1}_losses.csv", index=False)
+        print(f">>> Fold {fold+1}: losses guardados en results/fold{fold+1}_losses.csv")
+        best_model = stopper.best_model.to(device).eval()
+        test_sampler = MultiLayerFullNeighborSampler(args['n_layers'])
+        test_dl = NodeDataLoader(
+            graph,
+            torch.tensor(test_idx, dtype=torch.long, device=device),
+            test_sampler,
+            batch_size=args['batch_size'],
+            shuffle=False,
+            device=device
+        )
         with torch.no_grad():
-            _, test_feat, test_cat, test_label = load_subtensor(
-                g, feat_data, cat_data, labels, test_idx, device
-            )
-            test_logits = model(g, test_feat, test_label)
-            test_probs  = torch.sigmoid(test_logits)
+            for _, (inp, seeds, blks) in enumerate(test_dl):
+                bi, bw, bl, ll = load_lpa_subtensor(
+                    num_feat, cat_feat, labels, seeds, inp, device
+                )
+                blks = [b.to(device) for b in blks]
+                tv = best_model(blks, bi, ll, bw)
+                test_predictions[seeds] += tv
+        
+        y_all   = labels.cpu().numpy()[test_idx]
+        scores  = torch.softmax(test_predictions, dim=1)[test_idx, 1] \
+                        .detach().cpu().numpy()
 
-        auc = roc_auc_score(test_label.cpu(), test_probs.cpu())
-        f1  = f1_score(test_label.cpu(), test_probs.cpu() > 0.5)
-        ap  = average_precision_score(test_label.cpu(), test_probs.cpu())
+        mask = (y_all != 2)
+        df_pred = pd.DataFrame({
+            "fold":    fold + 1,
+            "y_true":  y_all[mask],
+            "y_score": scores[mask]
+        })
+        df_pred.to_csv(results_dir / f"fold{fold+1}_preds.csv", index=False)
+        print(f">>> Fold {fold+1}: preds guardados en results/fold{fold+1}_preds.csv")
+        
 
-        print(f"Test AUC: {auc:.4f} | F1: {f1:.4f} | AP: {ap:.4f}")
+    y_all_final = labels.cpu().numpy()[test_idx]
+    scores_final = torch.softmax(test_predictions, dim=1)[test_idx, 1].detach().cpu().numpy()
 
-        auc_list.append(auc)
-        f1_list.append(f1)
-        ap_list.append(ap)
+    mask_final = (y_all_final != 2)
+    y_true = y_all_final[mask_final]
+    scores = scores_final[mask_final]
+    preds  = (scores > 0.5).astype(int)  
 
-        # guardar métricas de la épocay
-        with open(f"fold_{fold+1}_metrics.json", "w") as f:
-            json.dump(epoch_metrics, f, indent=4)
+    print("Final test AUC :", roc_auc_score(y_true, scores))
+    print("Final test F1  :", f1_score(y_true, preds, average="macro"))
+    print("Final test AP  :", average_precision_score(y_true, scores))
 
-    # resultados globales
-    print("\n===== Resultados Promedio =====")
-    print(f"AUC: {np.mean(auc_list):.4f}")
-    print(f"F1 : {np.mean(f1_list):.4f}")
-    print(f"AP : {np.mean(ap_list):.4f}")
-
-    # guardar modelo final si se indica
     if args.get("save_model", False):
-        torch.save(best_model.state_dict(),
-                   args.get("model_path", "gtan_trained.pth"))
-        print(f"Modelo guardado en {args.get('model_path', 'gtan_trained.pth')}")
+        out_path = args.get("model_path", "model.pth")
+        torch.save(best_model.state_dict(), out_path)
+        print(f">>> Modelo final guardado en '{out_path}'")
 
-if __name__ == "__main__":
-    train_and_evaluate()
+
+
+
+def load_gtan_data(dataset: str, test_size: float):
+    if dataset != "S-FFSD":
+        raise ValueError(f"Dataset '{dataset}' no soportado. Sólo 'S-FFSD'.")
+
+    prefix = os.path.join(os.path.dirname(__file__), "..", "data/")
+    df = pd.read_csv(prefix + "S-FFSDneofull.csv")
+    df = df.loc[:, ~df.columns.str.contains('Unnamed')]
+    data = df[df["Labels"] <= 2].reset_index(drop=True)
+
+    # Construcción del grafo
+    src_all, tgt_all = [], []
+    for col in ["Source", "Target", "Location", "Type"]:
+        for _, grp in data.groupby(col):
+            idxs = grp.sort_values("Time").index.to_numpy()
+            for i in range(len(idxs)):
+                for j in range(1, 4):
+                    if i + j < len(idxs):
+                        src_all.append(idxs[i])
+                        tgt_all.append(idxs[i + j])
+    graph = dgl.graph((src_all, tgt_all))
+    graph = dgl.add_self_loop(graph)
+
+    # Codificación de categorías
+    cat_features = ["Target", "Location", "Type"]
+    for col in cat_features + ["Source"]:
+        le = LabelEncoder()
+        data[col] = le.fit_transform(data[col].astype(str))
+
+    feat_data = data.drop("Labels", axis=1)
+    labels    = data["Labels"]
+    indices   = list(range(len(labels)))
+
+    graph.ndata['feat']  = torch.from_numpy(feat_data.values).float()
+    graph.ndata['label'] = torch.from_numpy(labels.values).long()
+
+    train_idx, test_idx = train_test_split(
+        indices, test_size=test_size, stratify=labels, random_state=2
+    )
+
+    # Guarda el grafo por si quieres recargarlo
+    graph_path = prefix + f"graph-{dataset}.bin"
+    dgl.data.utils.save_graphs(graph_path, [graph])
+
+    return feat_data, labels, train_idx, test_idx, graph, cat_features
