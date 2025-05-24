@@ -28,8 +28,10 @@ TFG-GTAN-JAIMEDUFFY/
 │   └── gtan_main.py           # Entrenamiento, validación y test
 ├── notebooks/
 │   └── gnn-examples.ipynb     # Implementaciones con GCN, GAT y predicción de enlaces
+├── results/                   # Volcado de resultados
 ├── main.py                    # Punto de entrada para lanzar el experimento
 ├── environment.txt           # Dependencias necesarias
+├── plot_results.py           # Generar gráficas
 └── README.md
 ```
 
@@ -68,6 +70,12 @@ python feature_engineering/data_process.py
 
 ```bash
 python main.py
+```
+
+### 6. Genera las gráficas finales
+
+```bash
+ python plot_results.py
 ```
 
 ---
