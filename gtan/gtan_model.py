@@ -1,253 +1,356 @@
-import os
-import numpy as np
-import pandas as pd
-import dgl
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from pathlib import Path
-
-from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
-from sklearn.model_selection import StratifiedKFold, train_test_split
-
-from dgl.dataloading import MultiLayerFullNeighborSampler, NodeDataLoader
-from torch.optim.lr_scheduler import MultiStepLR
-
-from .gtan_model import GraphAttnModel
-from .gtan_lpa import load_lpa_subtensor
-from . import early_stopper
+from dgl.utils import expand_as_pair
+from dgl import function as fn
+from dgl.base import DGLError
+from dgl.nn.functional import edge_softmax
+import numpy as np
+cat_features = ["Target",
+                "Type",
+                "Location"]
 
 
-def gtan_main(feat_df, graph, train_idx, test_idx, labels, args, cat_features):
-    device = args['device']
-    graph = graph.to(device)
+class PosEncoding(nn.Module):
 
-    results_dir = Path("results")
-    results_dir.mkdir(exist_ok=True)
+    def __init__(self, dim, device, base=10000, bias=0):
 
-    oof_predictions  = torch.zeros(len(feat_df), 2, device=device)
-    test_predictions = torch.zeros(len(feat_df), 2, device=device)
+        super(PosEncoding, self).__init__()
+        """
+        Initialize the posencoding component
+        :param dim: the encoding dimension 
+		:param device: where to train model
+		:param base: the encoding base
+		:param bias: the encoding bias
+        """
+        p = []
+        sft = []
+        for i in range(dim):
+            b = (i - i % 2) / dim
+            p.append(base ** -b)
+            if i % 2:
+                sft.append(np.pi / 2.0 + bias)
+            else:
+                sft.append(bias)
+        self.device = device
+        self.sft = torch.tensor(
+            sft, dtype=torch.float32).view(1, -1).to(device)
+        self.base = torch.tensor(p, dtype=torch.float32).view(1, -1).to(device)
 
-    kfold = StratifiedKFold(
-        n_splits=args['n_fold'], shuffle=True, random_state=args['seed']
-    )
-    y_target = labels.iloc[train_idx].values
-
-    # Prepara tensores de features
-    num_feat = torch.from_numpy(feat_df.values).float().to(device)
-    cat_feat = {
-        col: torch.from_numpy(feat_df[col].values).long().to(device)
-        for col in cat_features
-    }
-    labels = torch.from_numpy(labels.values).long().to(device)
-    loss_fn = nn.CrossEntropyLoss().to(device)
-
-    
-    # Cross-validation
-    for fold, (trn_idx, val_idx) in enumerate(
-        kfold.split(feat_df.iloc[train_idx], y_target)
-    ):
-        print(f'=== Training fold {fold+1}/{args["n_fold"]} ===')
-        epoch_logs = []
-        trn_idx = torch.tensor(np.array(train_idx)[trn_idx], dtype=torch.long, device=device)
-        val_idx = torch.tensor(np.array(train_idx)[val_idx], dtype=torch.long, device=device)
-
-        train_sampler = MultiLayerFullNeighborSampler(args['n_layers'])
-        train_dl = NodeDataLoader(
-            graph, trn_idx, train_sampler,
-            batch_size=args['batch_size'], shuffle=True, device=device
-        )
-        val_dl = NodeDataLoader(
-            graph, val_idx, train_sampler,
-            batch_size=args['batch_size'], shuffle=False, device=device
-        )
-
-        drop_cfg = args['dropout']
-        if isinstance(drop_cfg, (list, tuple)):
-            drop_tuple = tuple(drop_cfg)
-        else:
-            drop_tuple = (drop_cfg, drop_cfg)
-
-        # Modelo y optimizador
-        model = GraphAttnModel(
-            in_feats=feat_df.shape[1],
-            hidden_dim=args['hid_dim'] // 4,
-            n_layers=args['n_layers'],
-            n_classes=2,
-            heads=[4] * args['n_layers'],
-            activation=nn.PReLU(),
-            drop=drop_tuple,
-            gated=args['gated'],
-            ref_df=feat_df,
-            cat_features=cat_feat,
-            device=device
-        ).to(device)
-
-        lr = args['lr'] * np.sqrt(args['batch_size'] / 1024)
-        optimizer = optim.Adam(model.parameters(),lr=float(lr),weight_decay=float(args['wd']))
-        scheduler = MultiStepLR(optimizer, milestones=[4000, 12000], gamma=0.3)
-
-        stopper = early_stopper(patience=args['early_stopping'], verbose=True)
-
-        # Bucles de entrenamiento
-        for epoch in range(args['max_epochs']):
-            model.train()
-            train_losses = []
-            for step, (input_nodes, seeds, blocks) in enumerate(train_dl):
-                batch_in, batch_work, batch_lbls, lpa_lbls = load_lpa_subtensor(
-                    num_feat, cat_feat, labels, seeds, input_nodes, device
-                )
-                blocks = [b.to(device) for b in blocks]
-
-                logits = model(blocks, batch_in, lpa_lbls, batch_work)
-                mask = batch_lbls == 2
-                logits = logits[~mask]
-                targets = batch_lbls[~mask]
-
-                loss = loss_fn(logits, targets)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                scheduler.step()
-
-                train_losses.append(loss.item())
-                if step % 10 == 0:
-                    preds = torch.argmax(logits, dim=1)
-                    acc = (preds == targets).float().mean()
-                    scores = torch.softmax(logits, dim=1)[:, 1].detach().cpu().numpy()
-                    try:
-                        ap  = average_precision_score(targets.cpu().numpy(), scores)
-                        auc = roc_auc_score(targets.cpu().numpy(), scores)
-                        print(f"[Epoch {epoch:03d} Batch {step:04d}] "
-                              f"loss={np.mean(train_losses):.4f} ap={ap:.4f} "
-                              f"acc={acc:.4f} auc={auc:.4f}")
-                    except:
-                        pass
-
-            # Validación
-            model.eval()
-            val_loss, val_acc_sum, val_count = 0.0, 0.0, 0
-            with torch.no_grad():
-                for _, (inp, seeds, blks) in enumerate(val_dl):
-                    bi, bw, bl, ll = load_lpa_subtensor(
-                        num_feat, cat_feat, labels, seeds, inp, device
-                    )
-                    blks = [b.to(device) for b in blks]
-                    vl = model(blks, bi, ll, bw)
-                    oof_predictions[seeds] = vl
-
-                    mask = bl == 2
-                    vl = vl[~mask]
-                    tgt = bl[~mask]
-                    val_loss += loss_fn(vl, tgt).item() * tgt.shape[0]
-                    val_acc_sum += (torch.argmax(vl, 1) == tgt).sum().item()
-                    val_count += tgt.shape[0]
-
-            mean_val_loss = val_loss / val_count
-            stopper.earlystop(mean_val_loss, model)
-            print(f"-- Validation loss: {mean_val_loss:.4f}")
-            epoch_logs.append({"epoch": epoch,"train_loss": float(np.mean(train_losses)),"val_loss":   float(mean_val_loss)})
-            if stopper.is_earlystop:
-                print(">>> Early stopping")
-                break
-
-        df_loss = pd.DataFrame(epoch_logs)
-        df_loss.to_csv(results_dir / f"fold{fold+1}_losses.csv", index=False)
-        print(f">>> Fold {fold+1}: losses guardados en results/fold{fold+1}_losses.csv")
-        best_model = stopper.best_model.to(device).eval()
-        test_sampler = MultiLayerFullNeighborSampler(args['n_layers'])
-        test_dl = NodeDataLoader(
-            graph,
-            torch.tensor(test_idx, dtype=torch.long, device=device),
-            test_sampler,
-            batch_size=args['batch_size'],
-            shuffle=False,
-            device=device
-        )
+    def forward(self, pos):
         with torch.no_grad():
-            for _, (inp, seeds, blks) in enumerate(test_dl):
-                bi, bw, bl, ll = load_lpa_subtensor(
-                    num_feat, cat_feat, labels, seeds, inp, device
-                )
-                blks = [b.to(device) for b in blks]
-                tv = best_model(blks, bi, ll, bw)
-                test_predictions[seeds] += tv
-        
-        y_all   = labels.cpu().numpy()[test_idx]
-        scores  = torch.softmax(test_predictions, dim=1)[test_idx, 1] \
-                        .detach().cpu().numpy()
-
-        mask = (y_all != 2)
-        df_pred = pd.DataFrame({
-            "fold":    fold + 1,
-            "y_true":  y_all[mask],
-            "y_score": scores[mask]
-        })
-        df_pred.to_csv(results_dir / f"fold{fold+1}_preds.csv", index=False)
-        print(f">>> Fold {fold+1}: preds guardados en results/fold{fold+1}_preds.csv")
-        
-
-    y_all_final = labels.cpu().numpy()[test_idx]
-    scores_final = torch.softmax(test_predictions, dim=1)[test_idx, 1].detach().cpu().numpy()
-
-    mask_final = (y_all_final != 2)
-    y_true = y_all_final[mask_final]
-    scores = scores_final[mask_final]
-    preds  = (scores > 0.5).astype(int)  
-
-    print("Final test AUC :", roc_auc_score(y_true, scores))
-    print("Final test F1  :", f1_score(y_true, preds, average="macro"))
-    print("Final test AP  :", average_precision_score(y_true, scores))
-
-    if args.get("save_model", False):
-        out_path = args.get("model_path", "model.pth")
-        torch.save(best_model.state_dict(), out_path)
-        print(f">>> Modelo final guardado en '{out_path}'")
+            if isinstance(pos, list):
+                pos = torch.tensor(pos, dtype=torch.float32).to(self.device)
+            pos = pos.view(-1, 1)
+            x = pos / self.base + self.sft
+            return torch.sin(x)
 
 
+class TransEmbedding(nn.Module):
+
+    def __init__(self, df=None, device='cpu', dropout=0.2, in_feats=82, cat_features=None):
+        """
+        Initialize the attribute embedding and feature learning compoent
+
+        :param df: the feature
+                :param device: where to train model
+                :param dropout: the dropout rate
+                :param in_feat: the shape of input feature in dimension 1
+                :param cat_feature: category features
+        """
+        super(TransEmbedding, self).__init__()
+        self.time_pe = PosEncoding(dim=in_feats, device=device, base=100)
+        #time_emb = time_pe(torch.sin(torch.tensor(df['time_span'].values)/86400*torch.pi))
+        self.cat_table = nn.ModuleDict({col: nn.Embedding(max(df[col].unique(
+        ))+1, in_feats).to(device) for col in cat_features if col not in {"Labels", "Time"}})
+        self.label_table = nn.Embedding(3, in_feats, padding_idx=2).to(device)
+        self.time_emb = None
+        self.emb_dict = None
+        self.label_emb = None
+        self.cat_features = cat_features
+        self.forward_mlp = nn.ModuleList(
+            [nn.Linear(in_feats, in_feats) for i in range(len(cat_features))])
+        self.dropout = nn.Dropout(dropout)
+
+    def forward_emb(self, df):
+        if self.emb_dict is None:
+            self.emb_dict = self.cat_table
+        # print(self.emb_dict)
+        # print(df['trans_md'])
+        support = {col: self.emb_dict[col](
+            df[col]) for col in self.cat_features if col not in {"Labels", "Time"}}
+        #self.time_emb = self.time_pe(torch.sin(torch.tensor(df['time_span'])/86400*torch.pi))
+        #support['time_span'] = self.time_emb
+        #support['labels'] = self.label_table(df['labels'])
+        return support
+
+    def forward(self, df):
+        support = self.forward_emb(df)
+        output = 0
+        for i, k in enumerate(support.keys()):
+            # if k =='time_span':
+            #    print(df[k].shape)
+            support[k] = self.dropout(support[k])
+            support[k] = self.forward_mlp[i](support[k])
+            output = output + support[k]
+        return output
 
 
-def load_gtan_data(dataset: str, test_size: float):
-    if dataset != "S-FFSD":
-        raise ValueError(f"Dataset '{dataset}' no soportado. Sólo 'S-FFSD'.")
+class TransformerConv(nn.Module):
 
-    prefix = os.path.join(os.path.dirname(__file__), "..", "data/")
-    df = pd.read_csv(prefix + "S-FFSDneofull.csv")
-    df = df.loc[:, ~df.columns.str.contains('Unnamed')]
-    data = df[df["Labels"] <= 2].reset_index(drop=True)
+    def __init__(self,
+                 in_feats,
+                 out_feats,
+                 num_heads,
+                 bias=True,
+                 allow_zero_in_degree=False,
+                 # feat_drop=0.6,
+                 # attn_drop=0.6,
+                 skip_feat=True,
+                 gated=True,
+                 layer_norm=True,
+                 activation=nn.PReLU()):
+        """
+        Initialize the transformer layer.
+        Attentional weights are jointly optimized in an end-to-end mechanism with graph neural networks and fraud detection networks.
+            :param in_feat: the shape of input feature
+            :param out_feats: the shape of output feature
+            :param num_heads: the number of multi-head attention 
+            :param bias: whether to use bias
+            :param allow_zero_in_degree: whether to allow zero in degree
+            :param skip_feat: whether to skip some feature 
+            :param gated: whether to use gate
+            :param layer_norm: whether to use layer regularization
+            :param activation: the type of activation function   
+        """
 
-    # Construcción del grafo
-    src_all, tgt_all = [], []
-    for col in ["Source", "Target", "Location", "Type"]:
-        for _, grp in data.groupby(col):
-            idxs = grp.sort_values("Time").index.to_numpy()
-            for i in range(len(idxs)):
-                for j in range(1, 4):
-                    if i + j < len(idxs):
-                        src_all.append(idxs[i])
-                        tgt_all.append(idxs[i + j])
-    graph = dgl.graph((src_all, tgt_all))
-    graph = dgl.add_self_loop(graph)
+        super(TransformerConv, self).__init__()
+        self._in_src_feats, self._in_dst_feats = expand_as_pair(in_feats)
+        self._out_feats = out_feats
+        self._allow_zero_in_degree = allow_zero_in_degree
+        self._num_heads = num_heads
 
-    # Codificación de categorías
-    cat_features = ["Target", "Location", "Type"]
-    for col in cat_features + ["Source"]:
-        le = LabelEncoder()
-        data[col] = le.fit_transform(data[col].astype(str))
+        self.lin_query = nn.Linear(
+            self._in_src_feats, self._out_feats*self._num_heads, bias=bias)
+        self.lin_key = nn.Linear(
+            self._in_src_feats, self._out_feats*self._num_heads, bias=bias)
+        self.lin_value = nn.Linear(
+            self._in_src_feats, self._out_feats*self._num_heads, bias=bias)
 
-    feat_data = data.drop("Labels", axis=1)
-    labels    = data["Labels"]
-    indices   = list(range(len(labels)))
+        #self.feat_dropout = nn.Dropout(p=feat_drop)
+        #self.attn_dropout = nn.Dropout(p=attn_drop)
+        if skip_feat:
+            self.skip_feat = nn.Linear(
+                self._in_src_feats, self._out_feats*self._num_heads, bias=bias)
+        else:
+            self.skip_feat = None
+        if gated:
+            self.gate = nn.Linear(
+                3*self._out_feats*self._num_heads, 1, bias=bias)
+        else:
+            self.gate = None
+        if layer_norm:
+            self.layer_norm = nn.LayerNorm(self._out_feats*self._num_heads)
+        else:
+            self.layer_norm = None
+        self.activation = activation
 
-    graph.ndata['feat']  = torch.from_numpy(feat_data.values).float()
-    graph.ndata['label'] = torch.from_numpy(labels.values).long()
+    def forward(self, graph, feat, get_attention=False):
+        """
+        Description: Transformer Graph Convolution
+        :param graph: input graph
+            :param feat: input feat
+            :param get_attention: whether to get attention
+        """
 
-    train_idx, test_idx = train_test_split(
-        indices, test_size=test_size, stratify=labels, random_state=2
-    )
+        graph = graph.local_var()
 
-    graph_path = prefix + f"graph-{dataset}.bin"
-    dgl.data.utils.save_graphs(graph_path, [graph])
+        if not self._allow_zero_in_degree:
+            if (graph.in_degrees() == 0).any():
+                raise DGLError('There are 0-in-degree nodes in the graph, '
+                               'output for those nodes will be invalid. '
+                               'This is harmful for some applications, '
+                               'causing silent performance regression. '
+                               'Adding self-loop on the input graph by '
+                               'calling `g = dgl.add_self_loop(g)` will resolve '
+                               'the issue. Setting ``allow_zero_in_degree`` '
+                               'to be `True` when constructing this module will '
+                               'suppress the check and let the code run.')
 
-    return feat_data, labels, train_idx, test_idx, graph, cat_features
+        # check if feat is a tuple
+        if isinstance(feat, tuple):
+            h_src = feat[0]
+            h_dst = feat[1]
+        else:
+            h_src = feat
+            h_dst = h_src[:graph.number_of_dst_nodes()]
+
+        # Step 0. q, k, v
+        q_src = self.lin_query(
+            h_src).view(-1, self._num_heads, self._out_feats)
+        k_dst = self.lin_key(h_dst).view(-1, self._num_heads, self._out_feats)
+        v_src = self.lin_value(
+            h_src).view(-1, self._num_heads, self._out_feats)
+        # Assign features to nodes
+        graph.srcdata.update({'ft': q_src, 'ft_v': v_src})
+        graph.dstdata.update({'ft': k_dst})
+        # Step 1. dot product
+        graph.apply_edges(fn.u_dot_v('ft', 'ft', 'a'))
+
+        # Step 2. edge softmax to compute attention scores
+        graph.edata['sa'] = edge_softmax(
+            graph, graph.edata['a'] / self._out_feats**0.5)
+
+        # Step 3. Broadcast softmax value to each edge, and aggregate dst node
+        graph.update_all(fn.u_mul_e('ft_v', 'sa', 'attn'),
+                         fn.sum('attn', 'agg_u'))
+
+        # output results to the destination nodes
+        rst = graph.dstdata['agg_u'].reshape(-1,
+                                             self._out_feats*self._num_heads)
+
+        if self.skip_feat is not None:
+            skip_feat = self.skip_feat(feat[:graph.number_of_dst_nodes()])
+            if self.gate is not None:
+                gate = torch.sigmoid(
+                    self.gate(
+                        torch.concat([skip_feat, rst, skip_feat - rst], dim=-1)))
+                rst = gate * skip_feat + (1 - gate) * rst
+            else:
+                rst = skip_feat + rst
+
+        if self.layer_norm is not None:
+            rst = self.layer_norm(rst)
+
+        if self.activation is not None:
+            rst = self.activation(rst)
+
+        if get_attention:
+            return rst, graph.edata['sa']
+        else:
+            return rst
+
+
+class GraphAttnModel(nn.Module):
+    def __init__(self,
+                 in_feats,
+                 hidden_dim,
+                 n_layers,
+                 n_classes,
+                 heads,
+                 activation,
+                 skip_feat=True,
+                 gated=True,
+                 layer_norm=True,
+                 post_proc=True,
+                 n2v_feat=True,
+                 drop=None,
+                 ref_df=None,
+                 cat_features=None,
+                 nei_features=None,
+                 device='cpu'):
+        """
+        Initialize the GTAN-GNN model
+        :param in_feats: the shape of input feature
+                :param hidden_dim: model hidden layer dimension
+                :param n_layers: the number of GTAN layers
+                :param n_classes: the number of classification
+                :param heads: the number of multi-head attention 
+                :param activation: the type of activation function
+                :param skip_feat: whether to skip some feature
+                :param gated: whether to use gate
+        :param layer_norm: whether to use layer regularization
+                :param post_proc: whether to use post processing
+                :param n2v_feat: whether to use n2v features
+        :param drop: whether to use drop
+                :param ref_df: whether to refer other node features
+                :param cat_features: category features
+                :param nei_features: neighborhood statistic features
+        :param device: where to train model
+        """
+
+        super(GraphAttnModel, self).__init__()
+        self.in_feats = in_feats
+        self.hidden_dim = hidden_dim
+        self.n_layers = n_layers
+        self.n_classes = n_classes
+        self.heads = heads
+        self.activation = activation
+        #self.input_drop = lambda x: x
+        self.input_drop = nn.Dropout(drop[0])
+        self.drop = drop[1]
+        self.output_drop = nn.Dropout(self.drop)
+        # self.pn = PairNorm(mode=pairnorm)
+        if n2v_feat:
+            self.n2v_mlp = TransEmbedding(
+                ref_df, device=device, in_feats=in_feats, cat_features=cat_features)
+        else:
+            self.n2v_mlp = lambda x: x
+        self.layers = nn.ModuleList()
+        self.layers.append(nn.Embedding(
+            n_classes+1, in_feats, padding_idx=n_classes))
+        self.layers.append(
+            nn.Linear(self.in_feats, self.hidden_dim*self.heads[0]))
+        self.layers.append(
+            nn.Linear(self.in_feats, self.hidden_dim*self.heads[0]))
+        self.layers.append(nn.Sequential(nn.BatchNorm1d(self.hidden_dim*self.heads[0]),
+                                         nn.PReLU(),
+                                         nn.Dropout(self.drop),
+                                         nn.Linear(self.hidden_dim *
+                                                   self.heads[0], in_feats)
+                                         ))
+
+        # build multiple layers
+        self.layers.append(TransformerConv(in_feats=self.in_feats,
+                                           out_feats=self.hidden_dim,
+                                           num_heads=self.heads[0],
+                                           skip_feat=skip_feat,
+                                           gated=gated,
+                                           layer_norm=layer_norm,
+                                           activation=self.activation))
+
+        for l in range(0, (self.n_layers - 1)):
+            # due to multi-head, the in_dim = num_hidden * num_heads
+            self.layers.append(TransformerConv(in_feats=self.hidden_dim * self.heads[l - 1],
+                                               out_feats=self.hidden_dim,
+                                               num_heads=self.heads[l],
+                                               skip_feat=skip_feat,
+                                               gated=gated,
+                                               layer_norm=layer_norm,
+                                               activation=self.activation))
+        if post_proc:
+            self.layers.append(nn.Sequential(nn.Linear(self.hidden_dim * self.heads[-1], self.hidden_dim * self.heads[-1]),
+                                             nn.BatchNorm1d(
+                                                 self.hidden_dim * self.heads[-1]),
+                                             nn.PReLU(),
+                                             nn.Dropout(self.drop),
+                                             nn.Linear(self.hidden_dim * self.heads[-1], self.n_classes)))
+        else:
+            self.layers.append(nn.Linear(self.hidden_dim *
+                               self.heads[-1], self.n_classes))
+
+    def forward(self, blocks, features, labels, n2v_feat=None):
+        """
+        :param blocks: train blocks
+        :param features: train features  (|input|, feta_dim)
+        :param labels: train labels (|input|, )
+        :param n2v_feat: whether to use n2v features 
+        """
+
+        if n2v_feat is None:
+            h = features
+        else:
+            h = self.n2v_mlp(n2v_feat)
+            h = features + h
+
+        label_embed = self.input_drop(self.layers[0](labels))
+        label_embed = self.layers[1](h) + self.layers[2](label_embed)
+        label_embed = self.layers[3](label_embed)
+        h = h + label_embed  # residual
+
+        for l in range(self.n_layers):
+            h = self.output_drop(self.layers[l+4](blocks[l], h))
+
+        logits = self.layers[-1](h)
+
+        return logits
