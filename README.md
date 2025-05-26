@@ -10,7 +10,7 @@ El repositorio se divide en dos partes:
 
 - Un notebook de jupyter **gnn-examples.ipynb** en la carpeta **/notebooks** con las implementaciones de modelos básicos como GCN y GAT sobre el dataset Cora. Estas implementaciones están pensadas como introducción conceptual a las GNNs y se pueden ejecutar de forma independiente en Google Colab o en cualquier entorno local con Jupyter Notebook sin necesidad de instalación adicional.
   
-- La implementación principal que consiste en la aplicación del modelo **GTAN (Graph Temporal Attention Network)** para la detección de fraude financiero sobre el conjunto de datos **S-FFSD (Suspicious Financial Fraud Sequence Dataset)**. Esta parte requiere un entorno de desarrollo definido en el archivo `environment.txt`, y se recomienda ejecutarla localmente en un entorno virtual (por ejemplo, `conda`).
+- La implementación principal que consiste en la aplicación del modelo **GTAN (Graph Temporal Attention Network)** para la detección de fraude financiero sobre el conjunto de datos **S-FFSD (Simulated Financial Fraud Semi-supervised Dataset)**. Esta parte requiere un entorno de desarrollo definido en el archivo `environment.txt`, y se recomienda ejecutarla localmente en un entorno virtual (por ejemplo, `conda`).
 
 ## Estructura del repositorio
 
